@@ -16,18 +16,24 @@ Blender's native COLLADA importer can sometimes struggle with certain `.dae` fil
 
 | File | Description |
 |------|-------------|
-| `dea2obj2import.py` | **Main addon** — imports `.dae` files into Blender via an OBJ intermediate step, with full texture and UV support. |
-| `dea2objconverter.py` | **Standalone converter addon** — adds a sidebar panel in the 3D Viewport to convert `.dae` files to `.obj` on disk without directly importing them. |
+| `dea2obj2import.py` | **Main addon** — imports `.dae` files into Blender via an OBJ intermediate step, with full texture support, automatic texture copying, and intelligent mesh/material naming. |
+| `dea2objconverter.py` | **Standalone converter addon** — adds a sidebar panel in the 3D Viewport to convert `.dae` files to OBJ+MTL on disk with material and texture mapping (without importing into Blender). Useful for batch conversion or external workflows. |
 
 ---
 
 ## Features
 
 - Parses COLLADA XML directly (no external dependencies)
-- Extracts vertices, normals, and UV coordinates
-- Detects and links texture images from `library_images`
-- Generates a proper `.mtl` material file alongside the OBJ
-- Supports multiple mesh objects within a single `.dae` file
+- **Namespace-aware XML parsing** — supports both COLLADA 1.4.1 and 1.5.0 formats
+- **Robust element discovery** — uses both namespace-aware queries and fallback mechanisms for maximum compatibility
+- Extracts vertices, normals, and UV coordinates with proper offset tracking
+- Detects and links texture images from `library_images` with recursive subdirectory search
+- Automatic **material-to-texture mapping** via the effect chain (image → effect → material)
+- Generates a proper `.mtl` material file alongside the OBJ with texture references
+- Supports multiple mesh objects within a single `.dae` file (mesh separation by material)
+- **Intelligent naming scheme** for multiple imports: `Mesh_N.NNN` pattern (e.g., first import: Mesh_0.001, Mesh_0.002; second import: Mesh_1.001, Mesh_1.002)
+- Automatic texture file copying and renaming to match the naming scheme
+- Handles both unified and separate vertex format types
 - Handles Blender 2.80+ and Blender 4.x (uses the correct OBJ import operator for each version)
 - Optional temp-file mode: converts to a temporary directory and cleans up after import
 - Integrates cleanly into **File > Import > COLLADA (.dae)** menu
@@ -81,21 +87,37 @@ Make sure any texture files referenced by the `.dae` are located in the **same d
 2. Navigate to the **DAE Converter** tab.
 3. Click **Convert .dae to .obj**.
 4. Select your `.dae` file in the file browser.
-5. The converted `.obj` file will be saved in the **same directory** as the source file.
+5. The converted `.obj` and `.mtl` files will be saved in the **same directory** as the source file.
+   - The `.obj` file will be named `<original_name>.obj`
+   - The `.mtl` file will contain all extracted materials and texture references
+   - Texture files are NOT copied; only geometric and material data are extracted
 
 ---
 
 ## How It Works
 
 1. The `.dae` file is parsed as XML using Python's standard library.
-2. The COLLADA namespace is stripped from all tags for uniform access.
-3. Geometry data is extracted from `library_geometries`:
+2. **COLLADA namespace handling:**
+   - The code uses namespace-aware XML queries (`{*}tag`) to work with COLLADA 1.5.0 files
+   - A fallback mechanism directly iterates through elements and matches by tag name for compatibility with different DAE formats
+   - This dual approach ensures support for both Spikanor (1.5.0) and Spikan_DS (1.4.1) variants
+3. **Material-to-texture extraction** via the COLLADA effect chain:
+   - Images are extracted from `library_images` with support for both direct (`<init_from>filename</init_from>`) and nested (`<init_from><ref>filename</ref></init_from>`) formats
+   - Effects are extracted from `library_effects`, connecting to images via surface references
+   - Materials are extracted from `library_materials`, linking to effects via `instance_effect`
+   - This chain (image → effect → material) is traversed to build the complete material-texture map
+   - Texture files are searched recursively in subdirectories (e.g., "Custom Color 1/", "Alt Textures/")
+4. Geometry data is extracted from `library_geometries`:
    - Vertex positions from the `VERTEX` source
    - Normals from the `NORMAL` source
    - UV coordinates from the `TEXCOORD` source
-4. The first image found in `library_images` is used as the diffuse texture.
-5. The data is written to a temporary (or permanent) `.obj` file with a matching `.mtl` material file.
+5. The data is written to a temporary (or permanent) `.obj` file with a matching `.mtl` material file containing all discovered textures.
 6. Blender's native OBJ importer (`wm.obj_import` on Blender 4+ or `import_scene.obj` on older versions) handles the final import.
+7. **Mesh and material renaming:**
+   - All imported meshes are renamed to the pattern `Mesh_N.NNN` where N is the import counter
+   - Materials are renamed to `Material_N.NNN` to match
+   - Texture files are copied and renamed accordingly
+   - If a file with the same name already exists, it's preserved and reused (avoiding unnecessary duplication)
 
 ### Multi-mesh support
 
@@ -105,10 +127,19 @@ When a `.dae` file contains multiple `<geometry>` elements, each is parsed into 
 
 ## Known Limitations
 
-- Only triangulated faces are supported (`<triangles>` elements). Polygonal faces (`<polylist>`, `<polygons>`) are not currently handled.
-- Only the **first image** found in `library_images` is used for texturing. Files with multiple materials are not fully supported.
+- Only triangulated faces are supported (`<triangles>` elements). `<polylist>` elements are converted to triangles via fan-triangulation, while `<polygons>` elements are not currently handled.
 - COLLADA features such as animations, skinning, cameras, and lights are ignored — only static geometry is imported.
-- The `dea2objconverter.py` script does not copy or resolve texture files; it only outputs geometry.
+- The `dea2objconverter.py` script does not copy texture files; it only outputs geometry. Use `dea2obj2import.py` for complete texture support.
+
+## Recent Improvements (v1.1)
+
+- ✅ **Full namespace support** for COLLADA 1.5.0 format files (Spikanor)
+- ✅ **Material-to-texture mapping** via COLLADA effect chain (image → effect → material)
+- ✅ **Recursive texture discovery** in subdirectories
+- ✅ **Multiple texture format support** (both `<init_from>filename</init_from>` and `<init_from><ref>filename</ref></init_from>`)
+- ✅ **Mesh separation by material** with proper naming scheme
+- ✅ **Automatic texture copying and renaming** for multi-import workflows
+- ✅ **UV map support** with proper offset tracking for both unified and separate vertex formats
 
 ---
 

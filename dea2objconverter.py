@@ -26,8 +26,36 @@ except ImportError:
 
 
 # ============================================================================
-# Conversion Function
+# Helper Functions for Texture and UV Map Support
 # ============================================================================
+
+def _find_texture_file(base_dir, filename):
+    """
+    Recursively search for a texture file in base_dir and subdirectories.
+    Useful for finding textures in organized folder structures like:
+      Custom Color 1/, Custom Color 2/, Normal Color/, etc.
+    Returns the full path if found, otherwise returns the basename.
+    """
+    if not filename or not base_dir:
+        return filename
+    
+    # Check if file exists in base directory
+    full_path = os.path.join(base_dir, filename)
+    if os.path.exists(full_path):
+        return filename
+    
+    # Search in subdirectories
+    try:
+        for root, dirs, files in os.walk(base_dir):
+            if filename in files:
+                rel_path = os.path.relpath(os.path.join(root, filename), base_dir)
+                return rel_path
+    except:
+        pass
+    
+    # Return basename if not found
+    return os.path.basename(filename)
+
 
 def _parse_sources(mesh):
     """Parse all <source> elements into a dict: source_id -> list of tuples."""
@@ -53,50 +81,126 @@ def _parse_vertex_semantics(vertices_el):
     return result
 
 
-def _build_material_texture_map(tree):
+def _build_material_texture_map(tree, base_dir=''):
     """
     Walk library_images -> library_effects -> library_materials.
     Returns: mat_id -> (mat_name, tex_filename_or_None), and set of all tex filenames.
+    Searches for texture files recursively if base_dir is provided.
+    Handles both <init_from>filename</init_from> and <init_from><ref>filename</ref></init_from> formats.
     """
     image_map = {}
-    for image in tree.findall('library_images/image'):
-        img_id = image.attrib.get('id', '')
-        init_from = image.find('init_from')
-        if init_from is not None and init_from.text:
-            raw = init_from.text.strip()
-            if raw.startswith('file://'):
-                raw = raw[7:]
-            image_map[img_id] = os.path.basename(raw)
+    root = tree.getroot()
+    
+    # Find library_images element with namespace awareness
+    lib_images = root.find('{*}library_images')
+    if lib_images is not None:
+        # Try namespace-aware findall first, then fallback to direct iteration
+        images = lib_images.findall('{*}image')
+        if not images:
+            # Fallback: iterate through all children and match by tag name (ignore namespace)
+            images = [child for child in lib_images if child.tag.endswith('image') or child.tag == 'image']
+        
+        for image in images:
+            img_id = image.attrib.get('id', '')
+            
+            # Try namespace-aware first, then fallback
+            init_from = image.find('{*}init_from')
+            if init_from is None:
+                init_from = image.find('init_from')
+            
+            if init_from is not None:
+                raw = None
+                # Try direct text first
+                if init_from.text:
+                    raw = init_from.text.strip()
+                # Try <ref> subelement (COLLADA 1.5 format)
+                if not raw:
+                    ref = init_from.find('{*}ref')
+                    if ref is None:
+                        ref = init_from.find('ref')
+                    if ref is not None and ref.text:
+                        raw = ref.text.strip()
+                
+                if raw:
+                    if raw.startswith('file://'):
+                        raw = raw[7:]
+                    # Search for texture file in subdirectories
+                    tex_file = _find_texture_file(base_dir, os.path.basename(raw))
+                    image_map[img_id] = tex_file
 
     effect_image_map = {}
-    for effect in tree.findall('library_effects/effect'):
-        eff_id = effect.attrib.get('id', '')
-        profile = effect.find('profile_COMMON')
-        if profile is None:
-            continue
-        for newparam in profile.findall('newparam'):
-            surface = newparam.find('surface')
-            if surface is not None:
-                init_from = surface.find('init_from')
-                if init_from is not None and init_from.text:
-                    effect_image_map[eff_id] = init_from.text.strip()
-                    break
+    lib_effects = root.find('{*}library_effects')
+    if lib_effects is not None:
+        # Try namespace-aware findall first, then fallback
+        effects = lib_effects.findall('{*}effect')
+        if not effects:
+            effects = [child for child in lib_effects if child.tag.endswith('effect') or child.tag == 'effect']
+        
+        for effect in effects:
+            eff_id = effect.attrib.get('id', '')
+            profile = effect.find('{*}profile_COMMON')
+            if profile is None:
+                profile = effect.find('profile_COMMON')
+            
+            if profile is None:
+                continue
+            
+            newparams = profile.findall('{*}newparam')
+            if not newparams:
+                newparams = profile.findall('newparam')
+            
+            for newparam in newparams:
+                surface = newparam.find('{*}surface')
+                if surface is None:
+                    surface = newparam.find('surface')
+                
+                if surface is not None:
+                    init_from = surface.find('{*}init_from')
+                    if init_from is None:
+                        init_from = surface.find('init_from')
+                    
+                    if init_from is not None:
+                        raw_img_id = None
+                        # Try direct text
+                        if init_from.text:
+                            raw_img_id = init_from.text.strip()
+                        # Try <ref> subelement
+                        if not raw_img_id:
+                            ref = init_from.find('{*}ref')
+                            if ref is None:
+                                ref = init_from.find('ref')
+                            if ref is not None and ref.text:
+                                raw_img_id = ref.text.strip()
+                        
+                        if raw_img_id:
+                            effect_image_map[eff_id] = raw_img_id
+                            break
 
     mat_tex_map = {}
     all_textures = set()
-    for material in tree.findall('library_materials/material'):
-        mat_id = material.attrib.get('id', '')
-        mat_name = material.attrib.get('name', mat_id)
-        inst = material.find('instance_effect')
-        tex_file = None
-        if inst is not None:
-            eff_id = inst.attrib.get('url', '').lstrip('#')
-            img_id = effect_image_map.get(eff_id)
-            if img_id:
-                tex_file = image_map.get(img_id)
-        mat_tex_map[mat_id] = (mat_name, tex_file)
-        if tex_file:
-            all_textures.add(tex_file)
+    lib_materials = root.find('{*}library_materials')
+    if lib_materials is not None:
+        # Try namespace-aware findall first, then fallback
+        materials = lib_materials.findall('{*}material')
+        if not materials:
+            materials = [child for child in lib_materials if child.tag.endswith('material') or child.tag == 'material']
+        
+        for material in materials:
+            mat_id = material.attrib.get('id', '')
+            mat_name = material.attrib.get('name', mat_id)
+            inst = material.find('{*}instance_effect')
+            if inst is None:
+                inst = material.find('instance_effect')
+            
+            tex_file = None
+            if inst is not None:
+                eff_id = inst.attrib.get('url', '').lstrip('#')
+                img_id = effect_image_map.get(eff_id)
+                if img_id:
+                    tex_file = image_map.get(img_id)
+            mat_tex_map[mat_id] = (mat_name, tex_file)
+            if tex_file:
+                all_textures.add(tex_file)
     return mat_tex_map, all_textures
 
 
@@ -107,27 +211,31 @@ def _triangulate_face(n):
 
 def convert_dae_to_obj(input_filepath, output_filepath):
     """
-    Convert a DAE file to OBJ + MTL format.
+    Convert a DAE file to OBJ + MTL format with full UV map support.
 
-    Handles:
-    - <triangles> and <polylist> (mixed tri/quad faces via <vcount>)
+    Features:
+    - Handles <triangles> and <polylist> (mixed tri/quad faces via <vcount>)
     - Unified vertex format: POSITION, TEXCOORD, NORMAL all in <vertices>
     - Separate per-primitive TEXCOORD / NORMAL inputs (classic format)
     - Multiple materials with per-polylist usemtl entries
+    - Recursive texture file search in subdirectories
+    - Enhanced MTL material properties for better texture application
     """
     try:
         tree = ET.ElementTree(file=input_filepath)
+        input_dir = os.path.dirname(input_filepath)
 
         # Strip COLLADA namespace
         for el in tree.iter():
             if '}' in el.tag:
                 el.tag = el.tag.split('}', 1)[1]
 
-        mat_tex_map, all_textures = _build_material_texture_map(tree)
+        # Build material map with recursive texture search
+        mat_tex_map, all_textures = _build_material_texture_map(tree, input_dir)
 
         meshes = tree.findall('library_geometries/geometry/mesh')
         if not meshes:
-            return False, "No mesh geometry found in DAE file"
+            return False, "No mesh geometry found in DAE file (enhanced UV map support)"
 
         base_mtl = os.path.splitext(os.path.basename(output_filepath))[0] + ".mtl"
         mtl_path = os.path.splitext(output_filepath)[0] + ".mtl"
@@ -146,15 +254,52 @@ def convert_dae_to_obj(input_filepath, output_filepath):
                 norm_data = sources.get(vtx_sem.get('NORMAL',    ''), [])
                 unified   = vtx_sem.get('TEXCOORD') is not None or vtx_sem.get('NORMAL') is not None
 
+                # Collect all primitives first to gather all UV/normal sources
+                prims = mesh.findall('triangles') + mesh.findall('polylist')
+                all_uv_sources = {vtx_sem.get('TEXCOORD')} if vtx_sem.get('TEXCOORD') else {None}
+                all_norm_sources = {vtx_sem.get('NORMAL')} if vtx_sem.get('NORMAL') else {None}
+                
+                for prim in prims:
+                    for inp in prim.findall('input'):
+                        sem = inp.attrib['semantic']
+                        if sem not in ('VERTEX',):
+                            src = inp.attrib.get('source', '').lstrip('#')
+                            if sem == 'TEXCOORD':
+                                all_uv_sources.add(src)
+                            elif sem == 'NORMAL':
+                                all_norm_sources.add(src)
+
                 obj_f.write(f"o Mesh_{mesh_idx}\n")
                 for v  in pos_data:  obj_f.write('v  %.4f %.4f %.4f\n' % tuple(v[:3]))
                 for vn in norm_data: obj_f.write('vn %.4f %.4f %.4f\n' % tuple(vn[:3]))
-                for uv in uv_data:   obj_f.write('vt %.4f %.4f\n' % (uv[0], 1.0 - uv[1]))
+                for uv in uv_data:   obj_f.write('vt %.4f %.4f\n' % (uv[0], uv[1]))
+
+                # Track offsets for all UV/normal sources
+                prim_uv_offsets = {vtx_sem.get('TEXCOORD'): gvt}
+                prim_norm_offsets = {vtx_sem.get('NORMAL'): gvn}
+                current_vt = gvt + len(uv_data)
+                current_vn = gvn + len(norm_data)
+                
+                for uv_src in all_uv_sources:
+                    if uv_src and uv_src not in prim_uv_offsets:
+                        uv_src_data = sources.get(uv_src, [])
+                        prim_uv_offsets[uv_src] = current_vt
+                        for uv in uv_src_data:
+                            obj_f.write('vt %.4f %.4f\n' % (uv[0], uv[1]))
+                        current_vt += len(uv_src_data)
+                
+                for norm_src in all_norm_sources:
+                    if norm_src and norm_src not in prim_norm_offsets:
+                        norm_src_data = sources.get(norm_src, [])
+                        prim_norm_offsets[norm_src] = current_vn
+                        for vn in norm_src_data:
+                            obj_f.write('vn %.4f %.4f %.4f\n' % tuple(vn[:3]))
+                        current_vn += len(norm_src_data)
 
                 has_uv = len(uv_data) > 0
                 has_vn = len(norm_data) > 0
 
-                for prim in mesh.findall('triangles') + mesh.findall('polylist'):
+                for prim in prims:
                     mat_id = prim.attrib.get('material', '')
                     mat_name, _ = mat_tex_map.get(mat_id, (mat_id or 'Material_001', None))
                     obj_f.write(f"usemtl {mat_name}\ns off\n")
@@ -165,16 +310,24 @@ def convert_dae_to_obj(input_filepath, output_filepath):
                     p_idx = list(map(int, p_el.text.split()))
 
                     prim_inputs = prim.findall('input')
+                    if not prim_inputs:
+                        continue
                     p_stride = max(int(inp.attrib.get('offset', 0)) for inp in prim_inputs) + 1
                     prim_off  = {inp.attrib['semantic']: int(inp.attrib.get('offset', 0))
                                  for inp in prim_inputs}
                     prim_src  = {inp.attrib['semantic']: inp.attrib.get('source', '').lstrip('#')
                                  for inp in prim_inputs if inp.attrib['semantic'] != 'VERTEX'}
 
-                    p_uv_data   = sources.get(prim_src.get('TEXCOORD', ''), uv_data   if unified else [])
-                    p_norm_data = sources.get(prim_src.get('NORMAL',   ''), norm_data if unified else [])
+                    prim_uv_src = prim_src.get('TEXCOORD', vtx_sem.get('TEXCOORD') if unified else None)
+                    prim_norm_src = prim_src.get('NORMAL', vtx_sem.get('NORMAL') if unified else None)
+                    
+                    p_uv_data   = sources.get(prim_uv_src, []) if prim_uv_src else []
+                    p_norm_data = sources.get(prim_norm_src, []) if prim_norm_src else []
                     p_has_uv = len(p_uv_data)   > 0
                     p_has_vn = len(p_norm_data)  > 0
+                    
+                    prim_uv_offset = prim_uv_offsets.get(prim_uv_src, gvt)
+                    prim_norm_offset = prim_norm_offsets.get(prim_norm_src, gvn)
 
                     if prim.tag == 'polylist':
                         vc_el = prim.find('vcount')
@@ -193,8 +346,15 @@ def convert_dae_to_obj(input_filepath, output_filepath):
                             for chunk in (raw[i0], raw[i1], raw[i2]):
                                 vi = chunk[prim_off.get('VERTEX', 0)]
                                 v_idx  = vi + 1 + gv
-                                vt_idx = vi + 1 + gvt if p_has_uv else None
-                                vn_idx = vi + 1 + gvn if p_has_vn else None
+                                
+                                if unified:
+                                    vt_idx = vi + 1 + prim_uv_offset if p_has_uv else None
+                                    vn_idx = vi + 1 + prim_norm_offset if p_has_vn else None
+                                else:
+                                    vt_raw = chunk[prim_off['TEXCOORD']] if 'TEXCOORD' in prim_off else None
+                                    vn_raw = chunk[prim_off['NORMAL']]   if 'NORMAL'   in prim_off else None
+                                    vt_idx = (vt_raw + 1 + prim_uv_offset) if vt_raw is not None else None
+                                    vn_idx = (vn_raw + 1 + prim_norm_offset) if vn_raw is not None else None
 
                                 if p_has_uv and p_has_vn:
                                     parts.append(f"{v_idx}/{vt_idx}/{vn_idx}")
@@ -208,27 +368,41 @@ def convert_dae_to_obj(input_filepath, output_filepath):
                             obj_f.write("f " + " ".join(parts) + "\n")
 
                 gv  += len(pos_data)
-                gvt += len(uv_data)
-                gvn += len(norm_data)
+                gvt = current_vt
+                gvn = current_vn
 
-        # Write MTL
+        # Write enhanced MTL file
         with open(mtl_path, 'w') as mtl_f:
+            mtl_f.write("# Enhanced MTL file with texture support\n")
+            mtl_f.write("# Generated from COLLADA via OBJ conversion\n")
+            mtl_f.write("# Supports reuse of textures across color variants\n\n")
+            
             written = set()
             for _, (mat_name, tex_file) in mat_tex_map.items():
                 if mat_name in written:
                     continue
                 written.add(mat_name)
                 mtl_f.write(f"newmtl {mat_name}\n")
-                mtl_f.write("Ka 1.0 1.0 1.0\nKd 1.0 1.0 1.0\nKs 0.0 0.0 0.0\nd 1.0\nillum 1\n")
+                mtl_f.write("Ka 1.0 1.0 1.0\n")  # Ambient
+                mtl_f.write("Kd 1.0 1.0 1.0\n")  # Diffuse
+                mtl_f.write("Ks 0.5 0.5 0.5\n")  # Specular (slightly reflective)
+                mtl_f.write("Ns 32.0\n")         # Shininess
+                mtl_f.write("d 1.0\n")            # Transparency
+                mtl_f.write("illum 2\n")         # Illumination model (with highlights)
                 if tex_file:
-                    mtl_f.write(f"map_Kd {tex_file}\n")
+                    mtl_f.write(f"map_Kd {tex_file}\n")  # Diffuse texture
+                    mtl_f.write(f"map_bump {tex_file}\n")  # Bump map (same texture)
                 mtl_f.write("\n")
+            
             if not written:
-                mtl_f.write("newmtl Material_001\nKa 1.0 1.0 1.0\nKd 1.0 1.0 1.0\n")
+                mtl_f.write("newmtl Material_001\n")
+                mtl_f.write("Ka 1.0 1.0 1.0\nKd 1.0 1.0 1.0\nKs 0.5 0.5 0.5\nNs 32.0\nillum 2\n")
 
-        return True, "Conversion successful!"
+        return True, "Conversion successful! (UV maps and textures included)"
 
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         return False, f"Error during conversion: {str(e)}"
 
 
@@ -262,11 +436,11 @@ class DAE_OT_ConvertToObj(Operator):
         input_path = bpy.path.abspath(self.filepath)
         output_path = os.path.splitext(input_path)[0] + ".obj"
         
-        # Convert
+        # Convert with enhanced UV map support
         success, message = convert_dae_to_obj(input_path, output_path)
         
         if success:
-            self.report({'INFO'}, f"Converted successfully to: {output_path}")
+            self.report({'INFO'}, f"Converted with UV maps!: {output_path}")
             return {'FINISHED'}
         else:
             self.report({'ERROR'}, message)
