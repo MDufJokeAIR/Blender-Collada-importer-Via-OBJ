@@ -2,12 +2,35 @@
 """
 DAE to OBJ Converter - Blender Addon
 Converts COLLADA (.dae) files to Wavefront (.obj) format
+
+VERSION HISTORY:
+  v1.1.0 - Added namespace-aware XML parsing for broader COLLADA version support,
+           material-to-texture mapping via effect chain, recursive texture discovery.
+           Now shares conversion logic with dea2obj2import.py.
+  v1.0.0 - Initial release with basic COLLADA 1.4.1 support
+
+ARCHITECTURE:
+  This addon is a STANDALONE converter that shares core conversion functions with
+  dea2obj2import.py (the Blender importer). Both use the same:
+    - Material-texture extraction logic
+    - XML parsing with namespace awareness
+    - OBJ/MTL generation code
+  
+  Use dea2objconverter.py for:
+    - Batch converting DAE files to OBJ on disk
+    - External workflows that don't require Blender import
+    - Testing/debugging conversion without importing
+  
+  Use dea2obj2import.py for:
+    - Direct import into Blender
+    - Automatic texture copying and material assignment
+    - Mesh separation and smart naming
 """
 
 bl_info = {
     "name": "DAE to OBJ Converter",
     "author": "Your Name",
-    "version": (1, 0, 0),
+    "version": (1, 1, 0),
     "blender": (2, 80, 0),
     "location": "View3D > Sidebar > DAE Converter",
     "description": "Convert COLLADA (.dae) files to Wavefront (.obj) format",
@@ -27,6 +50,18 @@ except ImportError:
 
 # ============================================================================
 # Helper Functions for Texture and UV Map Support
+# ============================================================================
+# NOTE: The following functions are SHARED between dea2obj2import.py and 
+# dea2objconverter.py and must be kept in sync:
+#   - _find_texture_file()
+#   - _parse_sources()
+#   - _parse_vertex_semantics()
+#   - _build_material_texture_map()
+#   - convert_dae_to_obj()
+#   - _triangulate_face()
+#
+# If you fix a bug or add a feature to any of these functions, please apply
+# the SAME FIX to the corresponding function in the other file.
 # ============================================================================
 
 def _find_texture_file(base_dir, filename):

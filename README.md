@@ -19,6 +19,18 @@ Blender's native COLLADA importer can sometimes struggle with certain `.dae` fil
 | `dea2obj2import.py` | **Main addon** — imports `.dae` files into Blender via an OBJ intermediate step, with full texture support, automatic texture copying, and intelligent mesh/material naming. |
 | `dea2objconverter.py` | **Standalone converter addon** — adds a sidebar panel in the 3D Viewport to convert `.dae` files to OBJ+MTL on disk with material and texture mapping (without importing into Blender). Useful for batch conversion or external workflows. |
 
+### Code Sharing & Synchronization
+
+Both addons share the same **core conversion functions**:
+- `_find_texture_file()` — recursive texture discovery
+- `_parse_sources()` — extract vertex data from DAE
+- `_parse_vertex_semantics()` — extract semantic mappings
+- `_build_material_texture_map()` — extract material-texture relationships via COLLADA effect chain
+- `convert_dae_to_obj()` — main DAE→OBJ conversion logic
+- `_triangulate_face()` — polygon triangulation
+
+**Important:** If you fix a bug or add a feature to any of these shared functions, please apply the same fix to **both** `dea2obj2import.py` and `dea2objconverter.py`. Each file has a comment block at the top of its conversion section documenting the shared functions.
+
 ---
 
 ## Features
@@ -98,9 +110,9 @@ Make sure any texture files referenced by the `.dae` are located in the **same d
 
 1. The `.dae` file is parsed as XML using Python's standard library.
 2. **COLLADA namespace handling:**
-   - The code uses namespace-aware XML queries (`{*}tag`) to work with COLLADA 1.5.0 files
+   - The code uses namespace-aware XML queries (`{*}tag`) to work with namespaced COLLADA files
    - A fallback mechanism directly iterates through elements and matches by tag name for compatibility with different DAE formats
-   - This dual approach ensures support for both Spikanor (1.5.0) and Spikan_DS (1.4.1) variants
+   - This dual approach ensures broad compatibility across various COLLADA versions (1.4.x and 1.5.x)
 3. **Material-to-texture extraction** via the COLLADA effect chain:
    - Images are extracted from `library_images` with support for both direct (`<init_from>filename</init_from>`) and nested (`<init_from><ref>filename</ref></init_from>`) formats
    - Effects are extracted from `library_effects`, connecting to images via surface references
@@ -133,7 +145,7 @@ When a `.dae` file contains multiple `<geometry>` elements, each is parsed into 
 
 ## Recent Improvements (v1.1)
 
-- ✅ **Full namespace support** for COLLADA 1.5.0 format files (Spikanor)
+- ✅ **Full namespace support** for namespaced COLLADA format files
 - ✅ **Material-to-texture mapping** via COLLADA effect chain (image → effect → material)
 - ✅ **Recursive texture discovery** in subdirectories
 - ✅ **Multiple texture format support** (both `<init_from>filename</init_from>` and `<init_from><ref>filename</ref></init_from>`)
@@ -145,7 +157,7 @@ When a `.dae` file contains multiple `<geometry>` elements, each is parsed into 
 
 ## Contributing
 
-Contributions and bug reports are welcome. If you encounter a `.dae` file that doesn't import correctly, feel free to open an issue with a minimal reproducible example.
+Contributions and bug reports are welcome. If you encounter a `.dae` file that doesn't import correctly, feel free to open an issue with details about the file format and any error messages.
 
 ---
 

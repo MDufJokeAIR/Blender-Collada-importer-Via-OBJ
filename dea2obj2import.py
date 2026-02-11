@@ -2,6 +2,27 @@
 """
 DAE to OBJ Importer with Texture Support - Blender Addon
 Imports COLLADA (.dae) files by converting to OBJ with MTL generation
+
+VERSION HISTORY:
+  v1.1.0 - Added namespace-aware XML parsing for broader COLLADA version support,
+           material-to-texture mapping via effect chain, recursive texture discovery,
+           mesh separation by material, intelligent naming scheme (Mesh_N.NNN),
+           automatic texture copying and shader node setup.
+  v1.0.0 - Initial release with COLLADA 1.4.1 support and basic texture handling
+
+ARCHITECTURE:
+  This addon is the Blender IMPORTER that shares core conversion logic with
+  dea2objconverter.py (the standalone converter). Both use the same:
+    - Material-texture extraction logic
+    - XML parsing with namespace awareness
+    - OBJ/MTL generation code
+  
+  This importer additionally provides:
+    - Automatic texture copying from DAE directory to output directory
+    - Material shader node creation and texture linking
+    - Mesh separation by material
+    - Smart naming scheme for multiple imports
+    - Post-import texture validation and caching
 """
 
 bl_info = {
@@ -30,7 +51,19 @@ except ImportError:
 
 
 # ============================================================================
-# Conversion Function
+# Conversion Functions (SHARED with dea2objconverter.py)
+# ============================================================================
+# NOTE: The following functions are shared between dea2obj2import.py and 
+# dea2objconverter.py and must be kept in sync:
+#   - _find_texture_file()
+#   - _parse_sources()
+#   - _parse_vertex_semantics()
+#   - _build_material_texture_map()
+#   - convert_dae_to_obj()
+#   - _triangulate_face()
+#
+# If you fix a bug or add a feature to any of these functions, please apply
+# the SAME FIX to the corresponding function in dea2objconverter.py.
 # ============================================================================
 
 def _parse_sources(mesh):
@@ -616,9 +649,9 @@ def _apply_textures_to_materials(mat_tex_map, texture_dir, input_dir=''):
                         print(f"  ✓ Matched (fuzzy): DAE material '{mat_name}' in '{mat.name}' -> texture '{tex}'")
                         break
             
-            # Try 3: For generic names like "phong1", "phong2", etc., try ordered matching
+            # Try 3: For generic material names, try ordered matching
             if not tex_file and mat_tex_map:
-                # For Spikanor-style materials (phong1, phong2, etc.)
+                # For generic material names (phong1, phong2, etc.)
                 # Use the first available texture if no direct match
                 for mat_id, (mat_name, tex) in mat_tex_map.items():
                     if tex and not tex_file:
