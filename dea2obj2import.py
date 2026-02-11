@@ -27,8 +27,8 @@ ARCHITECTURE:
 
 bl_info = {
     "name": "Import COLLADA via OBJ (w/ Textures)",
-    "author": "Your Name",
-    "version": (1, 1, 0),
+    "author": "MDufJokeAIR",
+    "version": (1, 2, 0),
     "blender": (2, 80, 0),
     "location": "File > Import > COLLADA (.dae)",
     "description": "Import COLLADA (.dae) files converting to OBJ+MTL",

@@ -29,7 +29,7 @@ ARCHITECTURE:
 
 bl_info = {
     "name": "DAE to OBJ Converter",
-    "author": "Your Name",
+    "author": "MDufJokeAIR",
     "version": (1, 1, 0),
     "blender": (2, 80, 0),
     "location": "View3D > Sidebar > DAE Converter",
