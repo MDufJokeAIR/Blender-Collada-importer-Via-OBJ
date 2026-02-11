@@ -26,137 +26,208 @@ except ImportError:
 
 
 # ============================================================================
-# Model Class (from original script)
-# ============================================================================
-
-class Model(object):
-    def __init__(self, residues=[], args=None, style='strand'):
-        self.v = []   # vertices
-        self.vn = []  # normals
-        self.vt = []  # texture coords
-        self.f = []   # faces
-    
-    def set_f(self, f_list):
-        self.f = f_list
-    
-    def exportObj(self, obj3d_path=''):
-        obj_str = []
-        obj_str = obj_str + list(map(lambda v: 'v %.3f %.3f %.3f\n' % tuple(v), self.v))
-        obj_str = obj_str + list(map(lambda v: 'vn %.3f %.3f %.3f\n' % tuple(v), self.vn))
-        obj_str = obj_str + list(map(lambda v: 'vt %.3f %.3f %.3f\n' % tuple(v), self.vt))
-        
-        if self.f:
-            if len(self.f[0]) == 3:
-                f_str = list(map(lambda f: 'f ' + ' '.join(map(str, f)) + '\n', self.f))
-            elif len(self.f[0]) == 6:
-                f_str = list(map(lambda f: 'f %d//%d %d//%d %d//%d\n' % tuple(f), self.f))
-            obj_str = obj_str + f_str
-        
-        self.obj_str = obj_str
-        if obj3d_path:
-            with open(obj3d_path, 'w') as f:
-                f.writelines(obj_str)
-        else:
-            return obj_str
-    
-    @staticmethod
-    def reduce(ma, mb):
-        mc = Model()
-        mc.v = (ma.v + mb.v)
-        mc.vn = (ma.vn + mb.vn)
-        mc.vt = (ma.vt + mb.vt)
-        num_va = len(ma.v)
-        num_vna = len(ma.vn)
-        num_vta = len(ma.vt)
-        f = mb.f
-        
-        if f:
-            if len(f[0]) == 3:
-                f = list(map(lambda fi: [x + num_va for x in fi], f))
-            elif len(f[0]) == 6:
-                for fi in f:
-                    fi[::2] = [x + num_va for x in fi[::2]]
-                    fi[1::2] = [x + num_vna for x in fi[1::2]]
-            elif len(f[0]) == 9:
-                for fi in f:
-                    fi[::3] = [x + num_va for x in fi[::3]]
-                    fi[1::3] = [x + num_vta for x in fi[1::3]]
-                    fi[2::3] = [x + num_vna for x in fi[2::3]]
-            mc.f = (ma.f + f)
-        return mc
-
-
-# ============================================================================
 # Conversion Function
 # ============================================================================
 
+def _parse_sources(mesh):
+    """Parse all <source> elements into a dict: source_id -> list of tuples."""
+    result = {}
+    for source in mesh.findall('source'):
+        src_id = source.attrib['id']
+        float_array = source.find('float_array')
+        if float_array is None:
+            continue
+        floats = list(map(float, float_array.text.split()))
+        accessor = source.find('technique_common/accessor')
+        stride = int(accessor.attrib.get('stride', 3)) if accessor is not None else 3
+        result[src_id] = [floats[i:i+stride] for i in range(0, len(floats), stride)]
+    return result
+
+
+def _parse_vertex_semantics(vertices_el):
+    """Return dict: semantic -> source_id for the <vertices> element."""
+    result = {}
+    if vertices_el is not None:
+        for inp in vertices_el.findall('input'):
+            result[inp.attrib['semantic']] = inp.attrib['source'].lstrip('#')
+    return result
+
+
+def _build_material_texture_map(tree):
+    """
+    Walk library_images -> library_effects -> library_materials.
+    Returns: mat_id -> (mat_name, tex_filename_or_None), and set of all tex filenames.
+    """
+    image_map = {}
+    for image in tree.findall('library_images/image'):
+        img_id = image.attrib.get('id', '')
+        init_from = image.find('init_from')
+        if init_from is not None and init_from.text:
+            raw = init_from.text.strip()
+            if raw.startswith('file://'):
+                raw = raw[7:]
+            image_map[img_id] = os.path.basename(raw)
+
+    effect_image_map = {}
+    for effect in tree.findall('library_effects/effect'):
+        eff_id = effect.attrib.get('id', '')
+        profile = effect.find('profile_COMMON')
+        if profile is None:
+            continue
+        for newparam in profile.findall('newparam'):
+            surface = newparam.find('surface')
+            if surface is not None:
+                init_from = surface.find('init_from')
+                if init_from is not None and init_from.text:
+                    effect_image_map[eff_id] = init_from.text.strip()
+                    break
+
+    mat_tex_map = {}
+    all_textures = set()
+    for material in tree.findall('library_materials/material'):
+        mat_id = material.attrib.get('id', '')
+        mat_name = material.attrib.get('name', mat_id)
+        inst = material.find('instance_effect')
+        tex_file = None
+        if inst is not None:
+            eff_id = inst.attrib.get('url', '').lstrip('#')
+            img_id = effect_image_map.get(eff_id)
+            if img_id:
+                tex_file = image_map.get(img_id)
+        mat_tex_map[mat_id] = (mat_name, tex_file)
+        if tex_file:
+            all_textures.add(tex_file)
+    return mat_tex_map, all_textures
+
+
+def _triangulate_face(n):
+    """Fan-triangulate a face with n vertices, returning list of (i,j,k) index triples."""
+    return [(0, i, i + 1) for i in range(1, n - 1)]
+
+
 def convert_dae_to_obj(input_filepath, output_filepath):
-    """Convert a DAE file to OBJ format"""
+    """
+    Convert a DAE file to OBJ + MTL format.
+
+    Handles:
+    - <triangles> and <polylist> (mixed tri/quad faces via <vcount>)
+    - Unified vertex format: POSITION, TEXCOORD, NORMAL all in <vertices>
+    - Separate per-primitive TEXCOORD / NORMAL inputs (classic format)
+    - Multiple materials with per-polylist usemtl entries
+    """
     try:
-        xmlns = "{http://www.collada.org/2005/11/COLLADASchema}"
-        
-        # Parse XML
         tree = ET.ElementTree(file=input_filepath)
-        
-        # Fix xmlns problem
+
+        # Strip COLLADA namespace
         for el in tree.iter():
             if '}' in el.tag:
                 el.tag = el.tag.split('}', 1)[1]
-        
-        # Parse COLLADA
+
+        mat_tex_map, all_textures = _build_material_texture_map(tree)
+
         meshes = tree.findall('library_geometries/geometry/mesh')
-        models = []
-        
-        for mesh in meshes:
-            sources = mesh.findall('source')
-            vertices = mesh.find('vertices')
-            triangles = mesh.find('triangles')
-            
-            if triangles is None:
-                continue
-                
-            triangles_p = triangles.find('p')
-            if triangles_p is None:
-                continue
-                
-            triangles_offset_dict = {}
-            source_id_dict = {}
-            
-            for triangles_input in triangles.findall('input'):
-                triangles_offset_dict[triangles_input.attrib['semantic']] = int(triangles_input.attrib['offset'])
-                if triangles_input.attrib['semantic'] == 'VERTEX':
-                    source_id_dict['VERTEX'] = vertices.find('input').attrib['source'][1:]
-                elif triangles_input.attrib['semantic'] == 'NORMAL':
-                    source_id_dict['NORMAL'] = triangles_input.attrib['source'][1:]
-            
-            source_float_dict = {}
-            for source in sources:
-                float_array = list(map(float, source.find('float_array').text.split()))
-                source_float_dict[source.attrib['id']] = list(map(lambda i: float_array[i:i+3], range(0, len(float_array), 3)))
-            
-            model = Model()
-            model.v = source_float_dict[source_id_dict['VERTEX']]
-            model.vn = source_float_dict[source_id_dict['NORMAL']]
-            
-            p_text_str = triangles_p.text.split()
-            p_text = list(map(lambda idx: int(idx) + 1, p_text_str))
-            obj_f = list(map(lambda i: p_text[i:i+len(triangles_offset_dict)*3], range(0, len(p_text), len(triangles_offset_dict)*3)))
-            f_list = list(map(lambda f: [f[triangles_offset_dict['VERTEX']], f[triangles_offset_dict['NORMAL']], 
-                                   f[triangles_offset_dict['VERTEX']+len(triangles_offset_dict)], 
-                                   f[triangles_offset_dict['NORMAL']+len(triangles_offset_dict)], 
-                                   f[triangles_offset_dict['VERTEX']+len(triangles_offset_dict)*2], 
-                                   f[triangles_offset_dict['NORMAL']+len(triangles_offset_dict)*2]], obj_f))
-            model.set_f(f_list)
-            models.append(model)
-        
-        if models:
-            from functools import reduce
-            final_model = reduce(Model.reduce, models)
-            final_model.exportObj(output_filepath)
-            return True, "Conversion successful!"
-        else:
-            return False, "No meshes found in DAE file"
-            
+        if not meshes:
+            return False, "No mesh geometry found in DAE file"
+
+        base_mtl = os.path.splitext(os.path.basename(output_filepath))[0] + ".mtl"
+        mtl_path = os.path.splitext(output_filepath)[0] + ".mtl"
+
+        with open(output_filepath, 'w') as obj_f:
+            obj_f.write(f"mtllib {base_mtl}\n")
+
+            gv = gvt = gvn = 0  # global offsets
+
+            for mesh_idx, mesh in enumerate(meshes):
+                sources   = _parse_sources(mesh)
+                vtx_sem   = _parse_vertex_semantics(mesh.find('vertices'))
+
+                pos_data  = sources.get(vtx_sem.get('POSITION', ''), [])
+                uv_data   = sources.get(vtx_sem.get('TEXCOORD',  ''), [])
+                norm_data = sources.get(vtx_sem.get('NORMAL',    ''), [])
+                unified   = vtx_sem.get('TEXCOORD') is not None or vtx_sem.get('NORMAL') is not None
+
+                obj_f.write(f"o Mesh_{mesh_idx}\n")
+                for v  in pos_data:  obj_f.write('v  %.4f %.4f %.4f\n' % tuple(v[:3]))
+                for vn in norm_data: obj_f.write('vn %.4f %.4f %.4f\n' % tuple(vn[:3]))
+                for uv in uv_data:   obj_f.write('vt %.4f %.4f\n' % (uv[0], 1.0 - uv[1]))
+
+                has_uv = len(uv_data) > 0
+                has_vn = len(norm_data) > 0
+
+                for prim in mesh.findall('triangles') + mesh.findall('polylist'):
+                    mat_id = prim.attrib.get('material', '')
+                    mat_name, _ = mat_tex_map.get(mat_id, (mat_id or 'Material_001', None))
+                    obj_f.write(f"usemtl {mat_name}\ns off\n")
+
+                    p_el = prim.find('p')
+                    if p_el is None or not p_el.text:
+                        continue
+                    p_idx = list(map(int, p_el.text.split()))
+
+                    prim_inputs = prim.findall('input')
+                    p_stride = max(int(inp.attrib.get('offset', 0)) for inp in prim_inputs) + 1
+                    prim_off  = {inp.attrib['semantic']: int(inp.attrib.get('offset', 0))
+                                 for inp in prim_inputs}
+                    prim_src  = {inp.attrib['semantic']: inp.attrib.get('source', '').lstrip('#')
+                                 for inp in prim_inputs if inp.attrib['semantic'] != 'VERTEX'}
+
+                    p_uv_data   = sources.get(prim_src.get('TEXCOORD', ''), uv_data   if unified else [])
+                    p_norm_data = sources.get(prim_src.get('NORMAL',   ''), norm_data if unified else [])
+                    p_has_uv = len(p_uv_data)   > 0
+                    p_has_vn = len(p_norm_data)  > 0
+
+                    if prim.tag == 'polylist':
+                        vc_el = prim.find('vcount')
+                        vcount = list(map(int, vc_el.text.split())) if vc_el is not None else []
+                    else:
+                        vcount = [3] * int(prim.attrib.get('count', 0))
+
+                    pos = 0
+                    for vc in vcount:
+                        raw = [p_idx[pos + j * p_stride : pos + j * p_stride + p_stride]
+                               for j in range(vc)]
+                        pos += vc * p_stride
+
+                        for (i0, i1, i2) in _triangulate_face(vc):
+                            parts = []
+                            for chunk in (raw[i0], raw[i1], raw[i2]):
+                                vi = chunk[prim_off.get('VERTEX', 0)]
+                                v_idx  = vi + 1 + gv
+                                vt_idx = vi + 1 + gvt if p_has_uv else None
+                                vn_idx = vi + 1 + gvn if p_has_vn else None
+
+                                if p_has_uv and p_has_vn:
+                                    parts.append(f"{v_idx}/{vt_idx}/{vn_idx}")
+                                elif p_has_uv:
+                                    parts.append(f"{v_idx}/{vt_idx}")
+                                elif p_has_vn:
+                                    parts.append(f"{v_idx}//{vn_idx}")
+                                else:
+                                    parts.append(f"{v_idx}")
+
+                            obj_f.write("f " + " ".join(parts) + "\n")
+
+                gv  += len(pos_data)
+                gvt += len(uv_data)
+                gvn += len(norm_data)
+
+        # Write MTL
+        with open(mtl_path, 'w') as mtl_f:
+            written = set()
+            for _, (mat_name, tex_file) in mat_tex_map.items():
+                if mat_name in written:
+                    continue
+                written.add(mat_name)
+                mtl_f.write(f"newmtl {mat_name}\n")
+                mtl_f.write("Ka 1.0 1.0 1.0\nKd 1.0 1.0 1.0\nKs 0.0 0.0 0.0\nd 1.0\nillum 1\n")
+                if tex_file:
+                    mtl_f.write(f"map_Kd {tex_file}\n")
+                mtl_f.write("\n")
+            if not written:
+                mtl_f.write("newmtl Material_001\nKa 1.0 1.0 1.0\nKd 1.0 1.0 1.0\n")
+
+        return True, "Conversion successful!"
+
     except Exception as e:
         return False, f"Error during conversion: {str(e)}"
 
